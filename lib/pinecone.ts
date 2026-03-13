@@ -9,13 +9,12 @@ export async function queryPinecone(
   embedding: number[],
   topK = 5
 ): Promise<string[]> {
-  const index = pc.index(indexName);
+  const index = pc.index(indexName).namespace(namespace);
 
   const result = await index.query({
     vector: embedding,
     topK,
     includeMetadata: true,
-    namespace,
   });
 
   return result.matches
@@ -29,6 +28,6 @@ export async function upsertToPinecone(
   embedding: number[],
   metadata: Record<string, string>
 ): Promise<void> {
-  const index = pc.index(indexName);
-  await index.upsert([{ id, values: embedding, metadata }], { namespace });
+  const index = pc.index(indexName).namespace(namespace);
+  await index.upsert({ records: [{ id, values: embedding, metadata }] });
 }
