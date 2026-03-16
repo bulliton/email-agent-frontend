@@ -1,35 +1,38 @@
 import OpenAI from "openai";
 import { openai, embedText } from "./openai";
-import { queryPinecone, upsertToPinecone } from "./pinecone";
+import { queryPinecone, queryFaqPinecone } from "./pinecone";
+import { BUSINESS_SYSTEM_PROMPT } from "./systemPrompt";
 
-const BUSINESS_NAME = process.env.BUSINESS_NAME || "Business";
-const SYSTEM_PROMPT =
-  process.env.BUSINESS_SYSTEM_PROMPT ||
-  `You are a professional email assistant for ${BUSINESS_NAME}. Write helpful, friendly, and concise email replies on behalf of the business.`;
+const SYSTEM_PROMPT = BUSINESS_SYSTEM_PROMPT;
 
 export async function generateReply(
   emailBody: string,
   sender: string,
-  subject: string
+  subject: string,
+  systemPromptOverride?: string
 ): Promise<string> {
   const query = `Subject: ${subject}\n\n${emailBody}`;
 
   // 1. Embed the incoming email
   const embedding = await embedText(query);
 
-  // 2. Retrieve relevant context from Pinecone
-  const contextChunks = await queryPinecone(embedding);
+  // 2. Retrieve FAQ knowledge + style examples from Pinecone (parallel)
+  const [faqChunks, contextChunks] = await Promise.all([
+    queryFaqPinecone(embedding),
+    queryPinecone(embedding),
+  ]);
+  const faqContext = faqChunks.join("\n\n---\n\n");
   const context = contextChunks.join("\n\n---\n\n");
 
   // 3. Build messages
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemPromptOverride || SYSTEM_PROMPT },
   ];
 
-  if (context) {
+  if (faqContext) {
     messages.push({
-      role: "system",
-      content: `Relevant information from our knowledge base:\n\n${context}`,
+      role: "user",
+      content: `WISSENSDATENBANK – FAQ FUNZELN.COM (autoritative Fakten – nutze diese Informationen direkt für deine Antwort, wenn sie relevant sind):\n\n${faqContext}`,
     });
   }
 
@@ -37,6 +40,13 @@ export async function generateReply(
     role: "user",
     content: `From: ${sender}\nSubject: ${subject}\n\n${emailBody}`,
   });
+
+  if (context) {
+    messages.push({
+      role: "user",
+      content: `BEISPIELANTWORTEN AUS DER WISSENSDATENBANK (nur zur Stilorientierung — können veraltete oder fehlerhafte Formulierungen enthalten):\n\nDie folgenden Beispiele dienen NUR als Stilreferenz. Die Regeln im System-Prompt haben ABSOLUTE PRIORITÄT. Alle verbotenen Formulierungen aus den Regeln müssen auch dann weggelassen werden, wenn sie in diesen Beispielen vorkommen.\n\n${context}`,
+    });
+  }
 
   // 4. Generate reply
   const completion = await openai.chat.completions.create({
@@ -46,19 +56,6 @@ export async function generateReply(
   });
 
   const reply = completion.choices[0].message.content || "";
-
-  // 5. Auto-save to Pinecone for RAG improvement (non-blocking)
-  const id = `auto-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  embedText(`${query}\n\nReply:\n${reply}`)
-    .then((replyEmbedding) =>
-      upsertToPinecone(id, replyEmbedding, {
-        text: `Email from ${sender} about "${subject}":\n${emailBody}\n\nReply:\n${reply}`,
-        sender,
-        subject,
-        timestamp: new Date().toISOString(),
-      })
-    )
-    .catch(() => {});
 
   return reply;
 }
